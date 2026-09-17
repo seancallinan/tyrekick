@@ -6,6 +6,8 @@
  *   npx tyrekick init               wire the widget into a project (≤2 questions)
  *   npx tyrekick init --yes …       non-interactive (for agents/CI)
  *   npx tyrekick status             print a one-shot status dashboard
+ *   npx tyrekick close | reopen     stop / resume accepting comments (same URL, data kept)
+ *   npx tyrekick lock | unlock      put a password in front of the hosted page (Cloudflare Workers static site)
  *   npx tyrekick disable | enable   remove/restore the widget, keeping all feedback data
  *   npx tyrekick remove [--teardown] safely uninstall (add --teardown to also delete the cloud worker)
  *
@@ -25,11 +27,18 @@ import {
   sendTest,
   printMcpAdd,
   cmdStatus,
+  cmdWindow,
+  cmdLock,
+  cmdUnlock,
+  rememberDeployment,
+  recordWidgetFile,
   cmdDisable,
   cmdEnable,
   cmdRemove,
   linkPreview,
   previewTags,
+  canonicalUrl,
+  ogUrlTag,
 } from "./lib.mjs";
 import { runMenu } from "./tui.mjs";
 
@@ -39,6 +48,12 @@ Usage:
   npx tyrekick                 Interactive management menu (default)
   npx tyrekick init [options]  Wire the feedback widget into a project
   npx tyrekick status          Show what's installed (widget / worker / MCP)
+  npx tyrekick status --all    Every deployment this CLI has seen, which are still open, and their unread count
+  npx tyrekick status --all --open   ...and list the open comments under each
+  npx tyrekick close           Stop accepting new comments. Same URL; page, data and read-back stay live
+  npx tyrekick reopen          Accept comments again for another wave (--days 14, or --never to remove the window)
+  npx tyrekick lock            Password-protect the hosted page and redeploy it (Cloudflare static site; --password <pw>)
+  npx tyrekick unlock          Remove the page password
   npx tyrekick disable         Remove the widget but keep the worker + all data (reversible)
   npx tyrekick enable          Restore a disabled widget
   npx tyrekick remove          Uninstall local wiring (widget tag + MCP registration)
@@ -48,6 +63,8 @@ init options:
   --webhook <url>      Destination URL (Discord webhook or Tyrekick worker). Prompted if omitted.
   --file <path>        HTML file to inject into (default: auto-detect index.html)
   --project <name>     Project label (default: current folder name)
+  --url <url>          Public review URL, for og:url so the unfurl is canonical
+  --password <pw>      Also password-protect the page (Cloudflare static site; same as \`lock\`)
   --app-version <v>    Version string (default: git short SHA, else "v0.1")
   --transport <t>      "discord" | "json" (default: auto-detect from URL)
   --no-test            Skip sending the test comment
@@ -66,9 +83,15 @@ function parseArgs(argv) {
     else if (a === "--no-test") args.noTest = true;
     else if (a === "--no-preview") args.noPreview = true;
     else if (a === "--teardown") args.teardown = true;
+    else if (a === "--all") args.all = true;
+    else if (a === "--open") args.open = true;
+    else if (a === "--never") args.never = true;
+    else if (a === "--days") args.days = argv[++i];
     else if (a === "--webhook") args.webhook = argv[++i];
     else if (a === "--file") args.file = argv[++i];
     else if (a === "--project") args.project = argv[++i];
+    else if (a === "--url") args.url = argv[++i];
+    else if (a === "--password") args.password = argv[++i];
     else if (a === "--app-version") args.appVersion = argv[++i];
     else if (a === "--transport") args.transport = argv[++i];
     else args._.push(a);
@@ -96,6 +119,10 @@ async function initCmd(args) {
   const file = detectHtml(args.file);
   const project = args.project || basename(resolve("."));
   const appVersion = args.appVersion || gitSha() || "v0.1";
+  // Validated before anything is written: a wrong og:url sends every unfurl to
+  // the wrong page, and a typo here should not leave a half-finished install.
+  const reviewUrl = args.url ? canonicalUrl(args.url) : null;
+  if (args.url && !reviewUrl) fail(`--url must be an absolute http(s) URL on a named host, got "${args.url}"`);
 
   // 3. Inject (idempotent)
   const html = readFileSync(file, "utf8");
@@ -114,6 +141,8 @@ async function initCmd(args) {
       : html + "\n" + tag;
     writeFileSync(file, updated);
     console.log(`✓ injected widget into ${file} (project: ${project}, version: ${appVersion}, transport: ${transport})`);
+    // So `status`, `disable` and `remove` find it again without re-guessing.
+    recordWidgetFile(file);
   }
 
   // 3b. Link preview. The review URL gets pasted into a chat, and that paste is
@@ -124,7 +153,14 @@ async function initCmd(args) {
     const current = readFileSync(file, "utf8");
     const pv = linkPreview(current);
     if (pv.hasOg) {
-      console.log(`· link preview already set — left alone`);
+      // An author who set og: tags meant them — but a missing og:url is a gap,
+      // not a decision, and they have just told us what it should be.
+      if (reviewUrl && !pv.url && current.includes("</head>")) {
+        writeFileSync(file, current.replace("</head>", `${ogUrlTag(reviewUrl)}</head>`));
+        console.log(`✓ added og:url to the existing link preview (${reviewUrl})`);
+      } else {
+        console.log(`· link preview already set — left alone`);
+      }
     } else if (!pv.title) {
       console.log(`⚠ ${file} has no <title>, so there is nothing to build a link preview from.`);
       console.log(`  Add one, then re-run — a shared link will otherwise unfurl as a bare URL.`);
@@ -132,6 +168,7 @@ async function initCmd(args) {
       const tags = previewTags({
         title: pv.title,
         description: pv.description || `Review ${pv.title} and pin your comments.`,
+        url: reviewUrl,
       });
       const withTags = current.includes("</head>")
         ? current.replace("</head>", `${tags}</head>`)
@@ -153,10 +190,20 @@ async function initCmd(args) {
       await sendTest(webhook, transport, project, appVersion);
       console.log(`✓ test comment sent — check your ${transport === "discord" ? "Discord channel" : "worker store"}`);
     } catch (e) {
-      console.log(`⚠ test comment failed (${e.message}) — the tag is installed; check the webhook URL.`);
+      // `review_closed` is a working worker standing down, not a broken install.
+      console.log(
+        e.message === "review_closed"
+          ? `⚠ the worker is deployed but its review window is closed — run \`npx tyrekick reopen\`.`
+          : `⚠ test comment failed (${e.message}) — the tag is installed; check the webhook URL.`,
+      );
     }
   }
+  // Bookmark the worker so `tyrekick status --all` can find it again later.
+  if (transport === "json") rememberDeployment(webhook, project);
   rl?.close();
+
+  // 4b. Page password (opt-in): wires the gate into the site's wrangler.jsonc and deploys.
+  if (args.password) await cmdLock({ password: args.password, slug: args.project, yes: true });
 
   // 5. Agent loop pointer (worker destinations only)
   if (transport === "json") {
@@ -179,7 +226,15 @@ async function main() {
     case "init":
       return initCmd(args);
     case "status":
-      return cmdStatus();
+      return cmdStatus({ all: !!args.all, open: !!args.open });
+    case "close":
+      return cmdWindow({ days: args.never ? null : Number(args.days ?? 0), verb: "close" });
+    case "reopen":
+      return cmdWindow({ days: args.never ? null : Number(args.days ?? 14), verb: "reopen" });
+    case "lock":
+      return cmdLock({ password: args.password, slug: args.project, yes: !!args.yes });
+    case "unlock":
+      return cmdUnlock();
     case "disable":
       return cmdDisable();
     case "enable":
@@ -193,7 +248,7 @@ async function main() {
       console.log(HELP);
       return;
     default:
-      fail(`Unknown command "${cmd}". Try: npx tyrekick (menu) — or init | status | disable | enable | remove`);
+      fail(`Unknown command "${cmd}". Try: npx tyrekick (menu) — or init | status | close | reopen | lock | unlock | disable | enable | remove`);
   }
 }
 

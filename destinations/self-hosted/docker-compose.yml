@@ -22,6 +22,10 @@ services:
       # TYREKICK_REVIEW_KEY: ${TYREKICK_REVIEW_KEY}
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       # AI_DAILY_CAP: "500"
+      # ISO-8601 instant after which POST /feedback refuses new comments.
+      # Not a secret — readable on purpose. Same URL keeps working; only
+      # ingest is gated. Unset/blank/unparseable = never closes.
+      # TYREKICK_OPEN_UNTIL: "2026-12-31T00:00:00Z"
       # Rate limiting (per IP). 0 disables either one.
       # INGEST_RATE_LIMIT: "15"
       # INGEST_RATE_PERIOD_SECONDS: "60"

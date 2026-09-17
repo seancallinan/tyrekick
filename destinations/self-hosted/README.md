@@ -90,6 +90,7 @@ HTTP.
 | `TYREKICK_REVIEW_KEY` | *(unset)* | Optional key enabling `GET /shared` (reviewers see each other's pins). Same trust model as the Worker — see [the Worker README](../cloudflare/README.md#get-sharedprojectroute--shared-review-review-key-not-the-token) |
 | `ANTHROPIC_API_KEY` | *(unset)* | Optional — enables the one-sentence AI acknowledgement (`ai_reply`), via Claude Haiku |
 | `AI_DAILY_CAP` | `500` | Global ceiling on AI acknowledgements generated per UTC day |
+| `TYREKICK_OPEN_UNTIL` | *(unset)* | Optional ISO-8601 instant after which `POST /feedback` (and `POST /`) refuse with `403 review_closed`. Not a secret — it's meant to be readable. Absent, empty or unparseable all mean the review never closes. Reads, receipts and shared review keep working after it passes; only ingest is gated. See [the Worker README](../cloudflare/README.md#6-close-the-review-when-the-wave-is-over-optional) |
 | `INGEST_RATE_LIMIT` / `INGEST_RATE_PERIOD_SECONDS` | `15` / `60` | Per-IP limit on `POST /feedback` (the write path). Set the limit to `0` to disable |
 | `READ_RATE_LIMIT` / `READ_RATE_PERIOD_SECONDS` | `120` / `60` | Per-IP limit on `GET /receipts` and `GET /shared`. Set the limit to `0` to disable |
 | `TRUST_PROXY` | `false` | Whether to believe `X-Forwarded-For` / `X-Real-IP` when keying the rate limiters. Set to `true` **only** behind a reverse proxy you control — see below |

@@ -26,6 +26,11 @@ type Config struct {
 	Token     string // TYREKICK_TOKEN — management routes
 	ReviewKey string // TYREKICK_REVIEW_KEY — GET /shared
 
+	// OpenUntil mirrors worker.ts's TYREKICK_OPEN_UNTIL: an ISO-8601 instant,
+	// a plain env var and deliberately NOT a secret. Absent, empty or
+	// unparseable all mean the review NEVER closes — see closedSince.
+	OpenUntil string
+
 	DiscordWebhook  string // DISCORD_WEBHOOK — optional tee
 	AnthropicAPIKey string // ANTHROPIC_API_KEY — optional AI acknowledgement
 	AIDailyCap      int
@@ -52,6 +57,7 @@ func loadConfig() Config {
 		DBPath:    envString("DB_PATH", "/data/tyrekick.db"),
 		Token:     os.Getenv("TYREKICK_TOKEN"),
 		ReviewKey: os.Getenv("TYREKICK_REVIEW_KEY"),
+		OpenUntil: os.Getenv("TYREKICK_OPEN_UNTIL"),
 
 		DiscordWebhook:  os.Getenv("DISCORD_WEBHOOK"),
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
@@ -202,6 +208,11 @@ func logStartup(cfg Config) {
 	log.Printf("tyrekick: discord forwarding %s", onOff(cfg.DiscordWebhook != ""))
 	log.Printf("tyrekick: ai acknowledgement %s", onOff(cfg.AnthropicAPIKey != ""))
 	log.Printf("tyrekick: shared review %s", onOff(cfg.ReviewKey != ""))
+	if closed := closedSince(cfg.OpenUntil); closed != "" {
+		log.Printf("tyrekick: review window CLOSED since %s", closed)
+	} else {
+		log.Printf("tyrekick: review window open (TYREKICK_OPEN_UNTIL=%q)", cfg.OpenUntil)
+	}
 	log.Printf("tyrekick: ingest rate limit %s", rateDesc(cfg.IngestRateLimit, cfg.IngestRatePeriod))
 	log.Printf("tyrekick: read rate limit %s", rateDesc(cfg.ReadRateLimit, cfg.ReadRatePeriod))
 	log.Printf("tyrekick: rate limits keyed on %s", ipSourceDesc(cfg.TrustProxy))

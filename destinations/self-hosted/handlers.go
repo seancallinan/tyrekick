@@ -34,6 +34,15 @@ var uuidShapeRE = regexp.MustCompile(`^[0-9a-fA-F-]{16,64}$`)
 /* -------------------------------------------------------------------- */
 
 func (a *App) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// Review window: closed gates INGEST ONLY. Checked before the body is
+	// read, so a closed review parses nothing, stores nothing and tees
+	// nothing. Lives here rather than in the router so both ingest routes
+	// (and any future third) are covered by one check.
+	if closed := closedSince(a.cfg.OpenUntil); closed != "" {
+		jsonResponse(w, http.StatusForbidden, map[string]interface{}{"ok": false, "error": "review_closed", "open_until": closed})
+		return
+	}
+
 	var payload map[string]interface{}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err := dec.Decode(&payload); err != nil {
@@ -71,11 +80,22 @@ func (a *App) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	payload["created_at"] = createdAt
 
+	// A connectivity check ("tyrekick init", the make-reviewable skill) proves
+	// the pipe works and then has no further purpose. Storing it as "open" is
+	// what leaves a project reporting a backlog nobody wrote.
+	isCheck := payload["kind"] == "verification"
+
 	record := FeedbackRecord(payload)
-	record["status"] = string(StatusOpen)
+	if isCheck {
+		record["status"] = string(StatusResolved)
+		record["resolved_at"] = receivedAt
+		record["resolution_note"] = "Automatic: connectivity check, not reviewer feedback."
+	} else {
+		record["status"] = string(StatusOpen)
+		record["resolved_at"] = nil
+		record["resolution_note"] = nil
+	}
 	record["received_at"] = receivedAt
-	record["resolved_at"] = nil
-	record["resolution_note"] = nil
 	record["ai_reply"] = nil
 
 	if err := a.store.SaveRecord(record); err != nil {
@@ -86,11 +106,13 @@ func (a *App) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// Optional Discord tee + AI acknowledgement: best-effort, run after the
 	// response, never block or fail the ingest. goBackground rather than a
 	// bare `go` so shutdown waits for them instead of closing the store
-	// out from under their writes.
+	// out from under their writes. Discord still tees for a verification
+	// check — mirroring is one of the things the check proves — but it never
+	// spends an AI reply on itself.
 	if a.cfg.DiscordWebhook != "" {
 		a.goBackground(func() { a.forwardToDiscord(record) })
 	}
-	if a.cfg.AnthropicAPIKey != "" {
+	if a.cfg.AnthropicAPIKey != "" && !isCheck {
 		a.goBackground(func() { a.maybeReply(record) })
 	}
 
@@ -224,7 +246,7 @@ func (a *App) handleReceipts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(ids) == 0 {
-		jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true, "receipts": []interface{}{}})
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true, "receipts": []interface{}{}, "review": reviewState(a.cfg.OpenUntil)})
 		return
 	}
 
@@ -248,7 +270,7 @@ func (a *App) handleReceipts(w http.ResponseWriter, r *http.Request) {
 			"ai_reply":        record["ai_reply"],
 		})
 	}
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true, "receipts": receipts})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true, "receipts": receipts, "review": reviewState(a.cfg.OpenUntil)})
 }
 
 /* -------------------------------------------------------------------- */
